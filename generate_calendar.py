@@ -195,10 +195,11 @@ def scrape_clickthecity() -> list[dict]:
 # -------------------------------------------------------------- build .ics ---
 def build_description(m: dict) -> str:
     lines = [(m["synopsis"] or "").strip()]
-    # Genre and runtime show as bare values (no labels); runtime only if known.
-    meta = [v for v in (m.get("genre"), m.get("runtime")) if v]
-    if meta:
-        lines += [""] + meta
+    # Genre and runtime show as bare values (no labels), each on its own line
+    # with a blank line between; runtime only if known.
+    for item in (m.get("genre"), m.get("runtime")):
+        if item:
+            lines += ["", item]
     lines += ["", "Director:", m.get("director") or "TBC"]
     lines += ["", "Cast:", m.get("cast") or "TBC"]
     lines += ["", "Status:", STATUS_LABEL.get(m["status"], "Expected PH")]
