@@ -100,17 +100,32 @@ def _ctc_id(url: str) -> str:
 
 
 def _parse_runtime(duration: str | None) -> str | None:
+    """ClickTheCity reports e.g. 'PT1 hr 41 minM' or 'PT2 hours'. Pull the
+    hours and minutes out robustly and render '1h 41m'."""
     if not duration:
         return None
-    h = re.search(r"(\d+)\s*(?:hr|hour|h)\b", duration)
-    m = re.search(r"(\d+)\s*(?:min|m)\b", duration)
-    if h and m:
-        return f"{int(h.group(1))}h {int(m.group(1))}m"
+    h = re.search(r"(\d+)\s*h", duration)        # '1 hr', '2 hours', '1h'
+    m = re.search(r"(\d+)\s*m(?:in)?", duration)  # '41 min', '41m'
+    parts = []
     if h:
-        return f"{int(h.group(1))}h"
+        parts.append(f"{int(h.group(1))}h")
     if m:
-        return f"{int(m.group(1))}m"
-    return None
+        parts.append(f"{int(m.group(1))}m")
+    return " ".join(parts) or None
+
+
+def _clean_synopsis(text: str | None, limit: int = 280) -> str:
+    """Collapse whitespace and trim to a clean, calendar-friendly length,
+    preferring to end on a sentence boundary."""
+    text = " ".join((text or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for sep in (". ", "! ", "? "):
+        idx = cut.rfind(sep)
+        if idx > limit * 0.5:
+            return cut[: idx + 1].strip()
+    return cut.rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
 
 
 def _names(value) -> list[str]:
@@ -163,7 +178,7 @@ def scrape_clickthecity() -> list[dict]:
                         "title": (obj.get("name") or "").strip(),
                         "date": d,
                         "status": "confirmed",
-                        "synopsis": (obj.get("description") or "").strip(),
+                        "synopsis": _clean_synopsis(obj.get("description")),
                         "director": ", ".join(_names(obj.get("director"))) or "TBC",
                         "cast": ", ".join(cast) or "TBC",
                         "runtime": _parse_runtime(obj.get("duration")),
