@@ -1,1 +1,2 @@
 icalendar>=6.0
+playwright>=1.44
