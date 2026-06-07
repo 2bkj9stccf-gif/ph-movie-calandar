@@ -1,9 +1,10 @@
 name: Update calendar
 
+# Rebuilds public/calendar.ics and publishes it to GitHub Pages.
 on:
   schedule:
-    - cron: "0 18 * * *"
-  workflow_dispatch: {}
+    - cron: "0 18 * * *"   # 18:00 UTC daily = 02:00 Asia/Manila
+  workflow_dispatch: {}      # lets you run it manually from the Actions tab
   push:
     branches: [main]
     paths:
@@ -16,6 +17,7 @@ permissions:
   pages: write
   id-token: write
 
+# Only one Pages deploy at a time.
 concurrency:
   group: pages
   cancel-in-progress: true
@@ -28,17 +30,25 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Install headless browser
+        run: python -m playwright install --with-deps chromium
+
       - name: Build calendar.ics
         run: python generate_calendar.py
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
