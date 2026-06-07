@@ -49,7 +49,13 @@ PLACEHOLDER_NOTE = "Global date used as placeholder until a PH cinema date is co
 # ---------------------------------------------------------------- scraping ---
 def _collect_detail_urls(page) -> list[str]:
     """Render the Coming Soon listing and collect unique movie detail URLs."""
-    page.goto(CTC_COMING_SOON, wait_until="networkidle", timeout=60000)
+    # Ad scripts keep the network busy, so never wait for "networkidle" — wait
+    # for the actual movie links to render instead.
+    page.goto(CTC_COMING_SOON, wait_until="domcontentloaded", timeout=60000)
+    try:
+        page.wait_for_selector('a[href*="/movies/title/"]', timeout=30000)
+    except Exception:
+        pass
     # lazy content: scroll to the bottom a few times
     for _ in range(6):
         page.mouse.wheel(0, 4000)
@@ -133,8 +139,14 @@ def scrape_clickthecity() -> list[dict]:
             print(f"ClickTheCity: {len(urls)} coming-soon titles")
             for url in urls:
                 try:
-                    page.goto(url, wait_until="networkidle", timeout=45000)
-                    obj = _ldjson_movie(page)
+                    page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    # The Movie JSON-LD is injected after hydration; poll for it.
+                    obj = None
+                    for _ in range(5):
+                        obj = _ldjson_movie(page)
+                        if obj:
+                            break
+                        page.wait_for_timeout(1500)
                     if not obj:
                         print(f"  no Movie data: {url}", file=sys.stderr)
                         continue
