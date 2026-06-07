@@ -7,10 +7,10 @@ overrides). There is NO hand-maintained film list.
 
 ClickTheCity renders its data with JavaScript, so we drive a headless Chromium
 (Playwright) to render each page and read the structured JSON-LD "Movie" block,
-which carries title, synopsis, genre, director, cast, the PH release date and
-runtime — i.e. everything the md's notes format needs.
+which carries title, synopsis, director, cast, the PH release date, runtime and
+rating — i.e. everything the md's notes format needs.
 
-Output: public/calendar.ics (md-compliant: clean 🍿 titles; Status on every
+Output: public/calendar.ics (md-compliant: clean 🎬 titles; Status on every
 event; all-day date-only; stable UIDs; Power Plant URL field; no VALARM;
 365-day window; excludes films already opened). Empty-guard: a run that
 scrapes nothing exits non-zero so a bad run can't overwrite the live file.
@@ -30,7 +30,7 @@ ROOT = Path(__file__).resolve().parent
 OUT_DIR = ROOT / "public"
 OUT_FILE = OUT_DIR / "calendar.ics"
 
-POPCORN = "\U0001F37F"
+ICON = "\U0001F3AC"  # 🎬 clapper (movie calendar)
 PRODID = "-//ph-movie-calendar//cinema//EN"
 CALNAME = "PH Cinema Releases"
 CALDESC = "Upcoming cinema releases relevant to the Philippines."
@@ -248,7 +248,7 @@ def main() -> int:
         ev = Event()
         ev.add("uid", f"{m['uid']}@ph-movie-calendar")
         ev.add("dtstamp", stamp)
-        ev.add("summary", f"{POPCORN} {m['title']}")
+        ev.add("summary", f"{ICON} {m['title']}")
         ev.add("dtstart", m["date"])
         ev.add("dtend", m["date"] + timedelta(days=1))
         ev.add("transp", "TRANSPARENT")
