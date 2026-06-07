@@ -7,8 +7,8 @@ overrides). There is NO hand-maintained film list.
 
 ClickTheCity renders its data with JavaScript, so we drive a headless Chromium
 (Playwright) to render each page and read the structured JSON-LD "Movie" block,
-which carries title, synopsis, director, cast, the PH release date, runtime and
-rating — i.e. everything the md's notes format needs.
+which carries title, synopsis, genre, director, cast, the PH release date and
+runtime — i.e. everything the md's notes format needs.
 
 Output: public/calendar.ics (md-compliant: clean 🍿 titles; Status on every
 event; all-day date-only; stable UIDs; Power Plant URL field; no VALARM;
@@ -179,6 +179,7 @@ def scrape_clickthecity() -> list[dict]:
                         "date": d,
                         "status": "confirmed",
                         "synopsis": _clean_synopsis(obj.get("description")),
+                        "genre": ", ".join(_names(obj.get("genre"))) or None,
                         "director": ", ".join(_names(obj.get("director"))) or "TBC",
                         "cast": ", ".join(cast) or "TBC",
                         "runtime": _parse_runtime(obj.get("duration")),
@@ -193,13 +194,12 @@ def scrape_clickthecity() -> list[dict]:
 
 # -------------------------------------------------------------- build .ics ---
 def build_description(m: dict) -> str:
-    lines = [
-        (m["synopsis"] or "").strip(),
-        "", "Director:", m.get("director") or "TBC",
-        "", "Cast:", m.get("cast") or "TBC",
-        "", "Runtime:", m.get("runtime") or "Not listed yet",
-        "", "Status:", STATUS_LABEL.get(m["status"], "Expected PH"),
-    ]
+    lines = [(m["synopsis"] or "").strip()]
+    lines += ["", "Genre:", m.get("genre") or "Not listed yet"]
+    lines += ["", "Runtime:", m.get("runtime") or "Not listed yet"]
+    lines += ["", "Director:", m.get("director") or "TBC"]
+    lines += ["", "Cast:", m.get("cast") or "TBC"]
+    lines += ["", "Status:", STATUS_LABEL.get(m["status"], "Expected PH")]
     note = m.get("date_note") or (PLACEHOLDER_NOTE if m["status"] == "expected" else None)
     if note:
         lines += ["", "Date note:", note]
