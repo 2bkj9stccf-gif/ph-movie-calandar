@@ -211,7 +211,7 @@ def build_description(m: dict) -> str:
 
 def main() -> int:
     today = datetime.now(timezone.utc).date()
-    stamp = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+    stamp = datetime.now(timezone.utc)  # build time → reliably signals updates
 
     movies = scrape_clickthecity()
 
@@ -248,6 +248,7 @@ def main() -> int:
         ev = Event()
         ev.add("uid", f"{m['uid']}@ph-movie-calendar")
         ev.add("dtstamp", stamp)
+        ev.add("last-modified", stamp)
         ev.add("summary", f"{ICON} {m['title']}")
         ev.add("dtstart", m["date"])
         ev.add("dtend", m["date"] + timedelta(days=1))
