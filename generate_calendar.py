@@ -17,6 +17,7 @@ scrapes nothing exits non-zero so a bad run can't overwrite the live file.
 """
 from __future__ import annotations
 
+import calendar as _calmod
 import json
 import re
 import sys
@@ -36,6 +37,7 @@ CALNAME = "PH Cinema Releases"
 CALDESC = "Upcoming cinema releases relevant to the Philippines."
 POWERPLANT_URL = "https://powerplantcinema.com/bin/homepage.php"
 WINDOW_DAYS = 365
+RETENTION_MONTHS = 6  # keep already-opened films this many months after release
 MIN_EVENTS = 1
 MAX_CAST = 5
 
@@ -209,6 +211,52 @@ def build_description(m: dict) -> str:
     return "\n".join(lines)
 
 
+def _months_ago(d: date, n: int) -> date:
+    """Return the date n calendar months before d (clamped to month length)."""
+    month = d.month - n
+    year = d.year
+    while month <= 0:
+        month += 12
+        year -= 1
+    day = min(d.day, _calmod.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def _event_date(ev) -> date | None:
+    """Pull the date out of an existing VEVENT's DTSTART (date-only or datetime)."""
+    dt = ev.get("dtstart")
+    if dt is None:
+        return None
+    val = dt.dt
+    return val.date() if isinstance(val, datetime) else val
+
+
+def load_retained_events(retain_start: date, today: date, exclude_uids: set[str]):
+    """Carry forward already-published events from the live calendar.ics whose
+    release date falls in [retain_start, today). The scraper only returns
+    upcoming ("coming soon") films, so past films must be preserved from the
+    previously published file or they'd vanish the day after release."""
+    if not OUT_FILE.exists():
+        return []
+    try:
+        old = Calendar.from_ical(OUT_FILE.read_bytes())
+    except Exception as e:
+        print(f"  could not read existing calendar for retention: {e}", file=sys.stderr)
+        return []
+    retained = []
+    for comp in old.walk("VEVENT"):
+        d = _event_date(comp)
+        if d is None:
+            continue
+        if not (retain_start <= d < today):
+            continue  # only past events inside the retention window
+        uid = str(comp.get("uid") or "")
+        if uid in exclude_uids:
+            continue  # the fresh scrape already has a newer copy
+        retained.append(comp)
+    return retained
+
+
 def main() -> int:
     today = datetime.now(timezone.utc).date()
     stamp = datetime.now(timezone.utc)  # build time → reliably signals updates
@@ -257,9 +305,18 @@ def main() -> int:
         ev.add("url", POWERPLANT_URL)
         cal.add_component(ev)
 
+    # Carry forward already-opened films so the calendar keeps a rolling
+    # RETENTION_MONTHS of history instead of dropping them the day after release.
+    retain_start = _months_ago(today, RETENTION_MONTHS)
+    new_uids = {f"{u}@ph-movie-calendar" for u in seen}
+    retained = load_retained_events(retain_start, today, new_uids)
+    for comp in retained:
+        cal.add_component(comp)
+
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     OUT_FILE.write_bytes(cal.to_ical())
-    print(f"Wrote {OUT_FILE}: {len(kept)} events (live from ClickTheCity, {today}).")
+    print(f"Wrote {OUT_FILE}: {len(kept)} upcoming + {len(retained)} retained "
+          f"past events (kept back to {retain_start}, live from ClickTheCity, {today}).")
     return 0
 
 
