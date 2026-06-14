@@ -21,6 +21,7 @@ import calendar as _calmod
 import json
 import re
 import sys
+import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,6 +37,11 @@ PRODID = "-//ph-movie-calendar//cinema//EN"
 CALNAME = "PH Cinema Releases"
 CALDESC = "Upcoming cinema releases relevant to the Philippines."
 POWERPLANT_URL = "https://powerplantcinema.com/bin/homepage.php"
+# The currently-published calendar. Retention reads THIS (not the committed
+# repo copy) so already-opened films accumulate across daily Pages deploys —
+# the workflow never commits calendar.ics back, so the repo copy is a frozen
+# seed that would never grow.
+PUBLISHED_URL = "https://2bkj9stccf-gif.github.io/ph-movie-calandar/calendar.ics"
 WINDOW_DAYS = 365
 RETENTION_MONTHS = 6  # keep already-opened films this many months after release
 MIN_EVENTS = 1
@@ -231,17 +237,34 @@ def _event_date(ev) -> date | None:
     return val.date() if isinstance(val, datetime) else val
 
 
-def load_retained_events(retain_start: date, today: date, exclude_uids: set[str]):
-    """Carry forward already-published events from the live calendar.ics whose
-    release date falls in [retain_start, today). The scraper only returns
-    upcoming ("coming soon") films, so past films must be preserved from the
-    previously published file or they'd vanish the day after release."""
-    if not OUT_FILE.exists():
-        return []
+def _load_previous_calendar() -> Calendar | None:
+    """Load the previously published calendar to carry history forward.
+
+    Prefer the LIVE published file (PUBLISHED_URL): the daily workflow deploys
+    to GitHub Pages without committing calendar.ics back, so the repo copy is a
+    frozen seed. Reading the live file is what lets history actually accumulate
+    run over run. Fall back to the local committed copy if the fetch fails."""
     try:
-        old = Calendar.from_ical(OUT_FILE.read_bytes())
+        req = urllib.request.Request(PUBLISHED_URL, headers={"User-Agent": "ph-movie-calendar"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return Calendar.from_ical(r.read())
     except Exception as e:
-        print(f"  could not read existing calendar for retention: {e}", file=sys.stderr)
+        print(f"  could not fetch published calendar ({e}); trying local copy", file=sys.stderr)
+    if OUT_FILE.exists():
+        try:
+            return Calendar.from_ical(OUT_FILE.read_bytes())
+        except Exception as e:
+            print(f"  could not read local calendar for retention: {e}", file=sys.stderr)
+    return None
+
+
+def load_retained_events(retain_start: date, today: date, exclude_uids: set[str]):
+    """Carry forward already-published events whose release date falls in
+    [retain_start, today). The scraper only returns upcoming ("coming soon")
+    films, so past films must be preserved from the previously published file
+    or they'd vanish the day after release."""
+    old = _load_previous_calendar()
+    if old is None:
         return []
     retained = []
     for comp in old.walk("VEVENT"):
