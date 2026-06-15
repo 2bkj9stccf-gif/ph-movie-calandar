@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """Build the Philippines cinema-releases calendar (.ics) — LIVE SOURCED.
 
-Data is fetched fresh every run from the PH cinema sources in the project md
-(currently ClickTheCity; Power Plant + others layer in as date-priority
-overrides). There is NO hand-maintained film list.
+Data comes fresh every run from ClickTheCity's JSON API
+(`/api/movies/upcoming`), which returns the upcoming PH cinema releases with
+title, synopsis, director, cast, genre, runtime and the PH release date. There
+is NO hand-maintained film list.
 
-ClickTheCity renders its data with JavaScript, so we drive a headless Chromium
-(Playwright) to render each page and read the structured JSON-LD "Movie" block,
-which carries title, synopsis, director, cast, the PH release date, runtime and
-rating — i.e. everything the md's notes format needs.
+We deliberately hit the API rather than scraping the rendered Coming Soon page:
+that page is a client-side app that periodically throws "Something went wrong"
+and renders no movie links (which silently produced an empty calendar). The API
+behind it stays healthy, needs no login, and gives clean structured data — so
+it's both simpler and far more robust. No headless browser required.
+
+The API returns the nearest ~10 upcoming films per call (pagination is not
+exposed), so retention does double duty: it carries forward previously-published
+events (both recent past AND still-future films not in the latest API page) so
+the calendar keeps its full rolling slate instead of collapsing to 10 entries.
 
 Output: public/calendar.ics (md-compliant: clean 🎬 titles; Status on every
-event; all-day date-only; stable UIDs; Power Plant URL field; no VALARM;
-365-day window; excludes films already opened). Empty-guard: a run that
-scrapes nothing exits non-zero so a bad run can't overwrite the live file.
+event; all-day date-only; stable UIDs; Power Plant URL field; no VALARM).
+Empty-guard: a run that fetches nothing exits non-zero so a bad run can't
+overwrite the live file.
 """
 from __future__ import annotations
 
@@ -26,7 +33,6 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from icalendar import Calendar, Event
-from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent
 OUT_DIR = ROOT / "public"
@@ -38,81 +44,29 @@ CALNAME = "PH Cinema Releases"
 CALDESC = "Upcoming cinema releases relevant to the Philippines."
 POWERPLANT_URL = "https://powerplantcinema.com/bin/homepage.php"
 # The currently-published calendar. Retention reads THIS (not the committed
-# repo copy) so already-opened films accumulate across daily Pages deploys —
-# the workflow never commits calendar.ics back, so the repo copy is a frozen
-# seed that would never grow.
+# repo copy) so films accumulate across daily Pages deploys — the workflow
+# never commits calendar.ics back, so the repo copy is a frozen seed.
 PUBLISHED_URL = "https://2bkj9stccf-gif.github.io/ph-movie-calandar/calendar.ics"
+# ClickTheCity upcoming-movies JSON API (the data source behind Coming Soon).
+API_URL = "https://www.clickthecity.com/api/movies/upcoming"
+USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36")
 WINDOW_DAYS = 365
 RETENTION_MONTHS = 6  # keep already-opened films this many months after release
 MIN_EVENTS = 1
 MAX_CAST = 5
 
-CTC = "https://www.clickthecity.com"
-CTC_COMING_SOON = f"{CTC}/movies/coming-soon"
-
 STATUS_LABEL = {"confirmed": "PH confirmed", "expected": "Expected PH"}
 PLACEHOLDER_NOTE = "Global date used as placeholder until a PH cinema date is confirmed."
 
 
-# ---------------------------------------------------------------- scraping ---
-def _collect_detail_urls(page) -> list[str]:
-    """Render the Coming Soon listing and collect unique movie detail URLs."""
-    # Ad scripts keep the network busy, so never wait for "networkidle" — wait
-    # for the actual movie links to render instead.
-    page.goto(CTC_COMING_SOON, wait_until="domcontentloaded", timeout=60000)
-    try:
-        page.wait_for_selector('a[href*="/movies/title/"]', timeout=30000)
-    except Exception:
-        pass
-    # lazy content: scroll to the bottom a few times
-    for _ in range(6):
-        page.mouse.wheel(0, 4000)
-        page.wait_for_timeout(700)
-    hrefs = page.eval_on_selector_all(
-        'a[href*="/movies/title/"]',
-        "els => els.map(e => e.getAttribute('href'))",
-    )
-    seen, urls = set(), []
-    for h in hrefs:
-        if not h or "/movies/title/" not in h:
-            continue
-        path = h if h.startswith("http") else CTC + h
-        path = path.split("?")[0].rstrip("/")
-        if path not in seen:
-            seen.add(path)
-            urls.append(path)
-    return urls
-
-
-def _ldjson_movie(page) -> dict | None:
-    """Return the JSON-LD object with @type == 'Movie' on the current page."""
-    blobs = page.eval_on_selector_all(
-        'script[type="application/ld+json"]',
-        "els => els.map(e => e.textContent)",
-    )
-    for raw in blobs:
-        try:
-            data = json.loads(raw)
-        except Exception:
-            continue
-        candidates = data if isinstance(data, list) else [data]
-        for obj in candidates:
-            if isinstance(obj, dict) and obj.get("@type") == "Movie":
-                return obj
-    return None
-
-
-def _ctc_id(url: str) -> str:
-    m = re.search(r"/movies/title/([^/]+)/", url + "/")
-    return m.group(1) if m else re.sub(r"\W+", "-", url)[-12:]
-
-
+# ----------------------------------------------------------------- helpers ---
 def _parse_runtime(duration: str | None) -> str | None:
-    """ClickTheCity reports e.g. 'PT1 hr 41 minM' or 'PT2 hours'. Pull the
-    hours and minutes out robustly and render '1h 41m'."""
+    """ClickTheCity reports e.g. '2 hrs 42 min' or '1 hr 35 min'. Pull the
+    hours and minutes out robustly and render '2h 42m'."""
     if not duration:
         return None
-    h = re.search(r"(\d+)\s*h", duration)        # '1 hr', '2 hours', '1h'
+    h = re.search(r"(\d+)\s*h", duration)        # '1 hr', '2 hrs', '1h'
     m = re.search(r"(\d+)\s*m(?:in)?", duration)  # '41 min', '41m'
     parts = []
     if h:
@@ -136,67 +90,63 @@ def _clean_synopsis(text: str | None, limit: int = 280) -> str:
     return cut.rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
 
 
-def _names(value) -> list[str]:
-    if not value:
-        return []
-    items = value if isinstance(value, list) else [value]
+def _api_names(items) -> list[str]:
+    """Pull display names out of an API person list (director / main_cast)."""
     out = []
-    for it in items:
+    for it in (items or []):
         if isinstance(it, dict) and it.get("name"):
-            out.append(it["name"])
-        elif isinstance(it, str):
-            out.append(it)
+            out.append(it["name"].strip())
+        elif isinstance(it, str) and it.strip():
+            out.append(it.strip())
     return out
 
 
-def scrape_clickthecity() -> list[dict]:
+# ------------------------------------------------------------------ fetch ---
+def parse_api_movies(payload: dict) -> list[dict]:
+    """Map ClickTheCity's /api/movies/upcoming JSON into our event dicts."""
+    rows = payload.get("data") if isinstance(payload, dict) else None
     movies: list[dict] = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(args=["--no-sandbox"])
-        page = browser.new_page(user_agent=(
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-        ))
+    for m in (rows or []):
+        title = (m.get("title") or "").strip()
+        if not title:
+            continue
         try:
-            urls = _collect_detail_urls(page)
-            print(f"ClickTheCity: {len(urls)} coming-soon titles")
-            for url in urls:
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                    # The Movie JSON-LD is injected after hydration; poll for it.
-                    obj = None
-                    for _ in range(5):
-                        obj = _ldjson_movie(page)
-                        if obj:
-                            break
-                        page.wait_for_timeout(1500)
-                    if not obj:
-                        print(f"  no Movie data: {url}", file=sys.stderr)
-                        continue
-                    pub = obj.get("datePublished")
-                    if not pub:
-                        continue
-                    try:
-                        d = date.fromisoformat(pub[:10])
-                    except ValueError:
-                        continue
-                    cast = _names(obj.get("actor"))[:MAX_CAST]
-                    movies.append({
-                        "uid": f"ctc-{_ctc_id(url)}",
-                        "title": (obj.get("name") or "").strip(),
-                        "date": d,
-                        "status": "confirmed",
-                        "synopsis": _clean_synopsis(obj.get("description")),
-                        "genre": ", ".join(_names(obj.get("genre"))) or None,
-                        "director": ", ".join(_names(obj.get("director"))) or "TBC",
-                        "cast": ", ".join(cast) or "TBC",
-                        "runtime": _parse_runtime(obj.get("duration")),
-                        "date_note": None,
-                    })
-                except Exception as e:  # one bad page must not sink the run
-                    print(f"  error {url}: {e}", file=sys.stderr)
-        finally:
-            browser.close()
+            d = date.fromisoformat((m.get("release_date") or "")[:10])
+        except ValueError:
+            continue  # no usable PH release date
+        # UID matches the historical scheme `ctc-<hash>` so events update in
+        # place (the old scraper derived <hash> from the /movies/title/<hash>/
+        # URL; the API hands us that same hash directly).
+        uid = m.get("hash") or m.get("movie_id")
+        cast = _api_names(m.get("main_cast"))[:MAX_CAST]
+        movies.append({
+            "uid": f"ctc-{uid}",
+            "title": title,
+            "date": d,
+            "status": "confirmed",
+            "synopsis": _clean_synopsis(m.get("synopsis")),
+            "genre": (m.get("genre") or "").strip() or None,
+            "director": ", ".join(_api_names(m.get("director"))) or "TBC",
+            "cast": ", ".join(cast) or "TBC",
+            "runtime": _parse_runtime(m.get("running_time")),
+            "date_note": None,
+        })
+    return movies
+
+
+def scrape_clickthecity() -> list[dict]:
+    """Fetch upcoming PH releases from the ClickTheCity JSON API."""
+    req = urllib.request.Request(
+        API_URL, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as r:
+            payload = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        print(f"  ClickTheCity API fetch failed: {e}", file=sys.stderr)
+        return []
+    movies = parse_api_movies(payload)
+    print(f"ClickTheCity API: {len(movies)} upcoming titles")
     return movies
 
 
@@ -242,10 +192,10 @@ def _load_previous_calendar() -> Calendar | None:
 
     Prefer the LIVE published file (PUBLISHED_URL): the daily workflow deploys
     to GitHub Pages without committing calendar.ics back, so the repo copy is a
-    frozen seed. Reading the live file is what lets history actually accumulate
-    run over run. Fall back to the local committed copy if the fetch fails."""
+    frozen seed. Reading the live file is what lets the calendar accumulate run
+    over run. Fall back to the local committed copy if the fetch fails."""
     try:
-        req = urllib.request.Request(PUBLISHED_URL, headers={"User-Agent": "ph-movie-calendar"})
+        req = urllib.request.Request(PUBLISHED_URL, headers={"User-Agent": USER_AGENT})
         with urllib.request.urlopen(req, timeout=30) as r:
             return Calendar.from_ical(r.read())
     except Exception as e:
@@ -258,11 +208,15 @@ def _load_previous_calendar() -> Calendar | None:
     return None
 
 
-def load_retained_events(retain_start: date, today: date, exclude_uids: set[str]):
-    """Carry forward already-published events whose release date falls in
-    [retain_start, today). The scraper only returns upcoming ("coming soon")
-    films, so past films must be preserved from the previously published file
-    or they'd vanish the day after release."""
+def load_retained_events(lo: date, hi: date, exclude_uids: set[str]):
+    """Carry forward previously-published events dated in [lo, hi] that the
+    fresh fetch didn't supply.
+
+    This preserves BOTH recent past films (so already-opened titles linger for
+    RETENTION_MONTHS) AND still-future films that the API's short
+    nearest-10 window no longer lists — without this, the calendar would shrink
+    to ~10 entries every run. Fresh-fetched UIDs are excluded so the latest data
+    wins on anything still in the API window."""
     old = _load_previous_calendar()
     if old is None:
         return []
@@ -271,11 +225,11 @@ def load_retained_events(retain_start: date, today: date, exclude_uids: set[str]
         d = _event_date(comp)
         if d is None:
             continue
-        if not (retain_start <= d < today):
-            continue  # only past events inside the retention window
+        if not (lo <= d <= hi):
+            continue
         uid = str(comp.get("uid") or "")
         if uid in exclude_uids:
-            continue  # the fresh scrape already has a newer copy
+            continue  # the fresh fetch has a newer copy
         retained.append(comp)
     return retained
 
@@ -300,7 +254,7 @@ def main() -> int:
     kept.sort(key=lambda x: x["date"])
 
     if len(kept) < MIN_EVENTS:
-        print(f"ERROR: scraped {len(kept)} usable events — refusing to publish.",
+        print(f"ERROR: fetched {len(kept)} usable events — refusing to publish.",
               file=sys.stderr)
         return 1
 
@@ -328,18 +282,20 @@ def main() -> int:
         ev.add("url", POWERPLANT_URL)
         cal.add_component(ev)
 
-    # Carry forward already-opened films so the calendar keeps a rolling
-    # RETENTION_MONTHS of history instead of dropping them the day after release.
+    # Carry forward previously-published films the API's short window dropped:
+    # recent past (rolling RETENTION_MONTHS) AND still-future titles, so the
+    # calendar keeps its full slate instead of collapsing to the latest ~10.
     retain_start = _months_ago(today, RETENTION_MONTHS)
+    window_end = today + timedelta(days=WINDOW_DAYS)
     new_uids = {f"{u}@ph-movie-calendar" for u in seen}
-    retained = load_retained_events(retain_start, today, new_uids)
+    retained = load_retained_events(retain_start, window_end, new_uids)
     for comp in retained:
         cal.add_component(comp)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     OUT_FILE.write_bytes(cal.to_ical())
-    print(f"Wrote {OUT_FILE}: {len(kept)} upcoming + {len(retained)} retained "
-          f"past events (kept back to {retain_start}, live from ClickTheCity, {today}).")
+    print(f"Wrote {OUT_FILE}: {len(kept)} fresh + {len(retained)} retained "
+          f"events (kept {retain_start} .. {window_end}, from ClickTheCity API, {today}).")
     return 0
 
 
